@@ -1,0 +1,442 @@
+#!/usr/bin/env bash
+function run_check() {
+local list item
+if command -v openssl &>/dev/null; then
+	readarray -t list < <( openssl help 2>&1 )
+	for item in "${md[@]}"; do
+		if ! [[ "${list[*],,}" =~ "${item,,}" ]]; then
+			printf -- '%s\n' "${app} requires openssl (v.1.1.1)" 1>&2
+			exit 1
+		fi
+	done
+else
+	printf -- '%s\n' "${app} requires packages: openssl" 1>&2
+	exit 1
+fi
+}
+function notice_improper() {
+	case "${warn}" in
+		1)
+			printf -- '%s\n' "${app}: ${data}: ${war_imp}: improperly formatted SHA-3 checksum line" 1>&2
+		;;
+	esac
+	case "${strict}" in
+		1)
+			code=1
+		;;
+	esac
+}
+function detect_type() {
+local bit_num count_algo num num_tag algo_num
+unset hash
+for algo in "${md[@]}"; do
+count_algo=$(( count_algo + 1 ))
+algo="${algo}"
+algo="${algo^^}"
+bit="${algo##*'-'}"
+bit="${bit/#"shake"}"
+algo="${algo} ("
+bit_num=$(( bit / 4 ))
+num="${line%%'  '*}"
+num="${#num}"
+num_tag="${line##*') = '}"
+num_tag="${#num_tag}"
+algo_num="${#algo}"
+case "${num}_${num_tag}" in
+	*_"${bit_num}")
+			case "${line:0:$algo_num}" in
+				"${algo}")
+					hash="${line##*") = "}"
+					data="${line/#"${algo}"}"
+					data="${data%") = "*}"
+					return 0
+				;;
+				*)
+					case "${count_algo}" in
+						"${#md[@]}")
+							war_imp=$(( war_imp + 1 ))
+							notice_improper
+							notice_impoper=1
+						;;
+						*)
+							continue
+						;;
+					esac							
+				;;
+			esac		
+	;;
+	"${bit_num}"_*)
+		hash="${line%%'  '*}"
+		data="${line##*'  '}"
+		return 0
+	;;
+	*_*)
+		case "${count_algo}" in
+			"${#md[@]}")
+				war_imp=$(( war_imp + 1 ))
+				notice_improper
+				notice_impoper=1
+			;;
+			*)
+				continue
+			;;
+		esac
+	;;
+esac
+done
+}
+function reject_untext() {
+local clean
+count=$(( count + 1 ))
+case "${count}" in
+	1)
+		clean="${line//[^[:print:]]}"
+		case "${#clean}" in
+			"${#line}")
+				:
+			;;
+			*)
+				data="${data:-"-"}"
+				printf -- '%s\n' "${data}: Is not a TXT file" 1>&2
+				code=1
+				return 1
+			;;
+		esac
+	;;
+	*)
+		return 1
+	;;
+esac
+}
+function set_hash() {
+	local count_algo
+	reject_untext || return 1
+	count_algo=0
+	if ! detect_type; then
+		notice_improper=1
+		return 1
+	fi
+}
+function reject_no_sum_files() {
+if [[ -d "${data}" ]]; then
+	printf -- '%s\n' "${app}: ${data}: Is a directory" 1>&2
+	war_unr=$(( war_unr + 1 ))
+	code=1
+	return 1	
+elif [[ -f "${data}" ]]; then
+	if [[ -r "${data}" ]]; then
+		return 0
+	else
+		case "${ignore}" in
+			1)
+				return 1
+			;;
+			0)
+				if ! [[ -r "${data}" ]]; then
+						printf -- '%s\n' "${data}: FAILED open or read"
+				fi
+				war_unr=$(( war_unr + 1 ))
+				code=1
+				return 1
+			;;
+		esac		
+	fi
+else
+	printf -- '%s\n' "${app}: ${data}: No such file or directory" 1>&2
+	printf -- '%s\n' "${data}: FAILED open or read"
+	war_unr=$(( war_unr + 1 ))
+	code=1
+	return 1
+fi
+}
+function run_hash() {
+	local compare
+	case "${notice_impoper}" in
+		0)
+			case "${algo:0:5}" in
+				shake)
+					bit+=000
+				;;
+			esac
+				if reject_no_sum_files; then
+				compare=$( "${0}" -a "${bit}" -- "${data}" )
+				case "${compare}" in
+						"${hash}  ${data}")
+						case "${silent}" in
+							0)
+								printf -- '%s\n' "${data}: OK"
+						;;
+						esac				
+					;;
+					*)
+						printf -- '%s\n' "${data}: FAILED"
+						war_fail=$(( war_fail + 1 ))
+						code=1
+						return 1
+					;;
+				esac
+			fi
+		;;
+		1)
+			return 1
+		;;
+	esac
+}
+function process_sum() {
+local notice_improper
+while read -r line; do
+	count=0
+	notice_impoper=0
+	if set_hash; then
+		run_hash
+	else
+		return 1
+	fi
+done < "${1}"
+return "${code:-"0"}"
+}
+function set_sum() {
+algo="${algo} ("
+bit=$(( bit / 4 ))
+case "${#}" in
+	0)
+		process_sum "/dev/stdin"
+	;;
+	*)
+		for data in "${@}"; do
+			if [[ -d "${data}" ]]; then
+				printf -- '%s\n' "${app}: ${data}: Is a directory" 1>&2
+				code=1
+			elif [[ -s "${data}" ]]; then
+				process_sum "${data}"
+			else
+				printf -- '%s\n' "${app}: ${data}: No such file" 1>&2
+				code=1
+			fi
+		done
+	;;
+esac
+case "${war_imp}" in
+	"")
+		:
+	;;
+	1)
+		printf -- '%s\n' "${app}: WARNING: 1 line is improperly formatted" 1>&2
+	;;
+	*)
+		printf -- '%s\n' "${app}: WARNING: ${war_imp} lines are improperly formatted" 1>&2
+	;;
+esac
+case "${war_unr}" in
+	"")
+		:
+	;;
+	1)
+		printf -- '%s\n' "${app}: WARNING: 1 listed file could not be read" 1>&2
+	;;
+	*)
+		printf -- '%s\n' "${app}: WARNING: ${war_unr} listed files could not be read" 1>&2
+	;;
+esac
+case "${war_fail}" in
+	"")
+		:
+	;;
+	1)
+		printf -- '%s\n' "${app}: WARNING: 1 computed checksum did NOT match" 1>&2
+	;;
+	*)
+		printf -- '%s\n' "${app}: WARNING: ${war_fail} computed checksum did NOT match" 1>&2
+	;;
+esac
+exit "${code:-"0"}"
+}
+function process_data() {
+local checksum
+checksum=$( openssl dgst -"${algo,,}" -- /dev/stdin 2>/dev/null < "${data}" )
+data="${data/#'/dev/stdin'/'-'}"
+checksum="${checksum/"${algo}(/dev/stdin)= "}"
+case "${tag}" in
+	0)
+		printf -- '%s\n' "${checksum}  ${data}"
+	;;
+	1)
+		printf -- '%s\n' "${algo} (${data}) = ${checksum}"
+	;;
+esac
+}
+function set_data() {
+local data
+for data in "${@}"; do	
+	case "${data}" in
+		"-")
+			data="/dev/stdin"
+		;;
+	esac
+	if [[ -d "${data}" ]]; then
+		printf -- '%s\n' "${app}: ${data}: Is a directory" 1>&2
+		code=1
+	elif [[ -e "${data}" ]]; then
+		if [[ -r "${data}" ]]; then
+			process_data "${data}"
+		else
+			printf -- '%s\n' "${app}: ${data}: Permission denied" 1>&2
+			code=1
+		fi
+	else
+		printf -- '%s\n' "${app}: ${data}: No such file or directory" 1>&2
+		code=1
+	fi			
+done
+}
+function show_help() {
+local help_text
+help_text="Usage: ${app} [OPTION]... [FILE]...
+Print or check SHA-3 checksums.
+With no FILE, or when FILE is -, read standard input.
+
+      -a [NUM]         choose a SHA-3 algo:
+                             224         SHA-3 224-bit (default)
+                             256         SHA-3 256-bit
+                             384         SHA-3 384-bit
+                             512         SHA-3 512-bit
+      -c, --check      read sums from the FILEs and check them
+      --tag            create a BSD-style checksum
+      --ignore-missing don't fail or report status for missing files
+      -q, --quiet          don't print OK for each successfully verified file
+      -s, --status         don't output anything, status code shows success
+      --strict         exit non-zero for improperly formatted checksum lines
+      -w, --warn       warn about improperly formatted checksum lines
+      -h, --help       display this help and exit
+      -v, --version    output version information and exit"
+printf -- '%s\n' "${help_text}"
+exit 0
+}
+function show_unrec() {
+printf -- '%s\n' "${app}: unrecognized option '${OPTARG}'" 1>&2
+exit 1
+}
+function set_algo() {
+bit="${OPTARG//[^0-9]}"
+case "${bit}" in
+	224|256|384|512)
+		bit="${bit}"
+		algo="SHA3-${bit}"
+	;;
+	128000|256000)
+		bit="${bit%000}"
+		algo="SHAKE${bit}"
+	;;
+	*)
+		OPTARG="a ${OPTARG}"
+		show_unrec
+	;;
+esac
+}
+function main() {
+local code app data option
+code=0
+tag=0
+check=0
+silent=0
+ignore=0
+strict=0
+status=0
+warn=0
+bit=224
+algo="SHA3-${bit}"
+app="${0##*'/'}"
+ver="1.0"
+md=( shake128 shake256 sha3-224 sha3-256 sha3-384 sha3-512 )
+run_check
+while getopts ":hqcwa:btU0pzs-:" option; do
+	case "${option}" in
+	a)
+		set_algo
+	;;
+	h)
+		show_help
+	;;
+	q)
+		silent=1
+	;;
+	c)
+		check=1
+	;;
+	w)
+		warn=1
+	;;
+	s)
+		status=1
+	;;
+	b|t|U|0|p|z)
+		:
+	;;
+	-)
+		case "${OPTARG}" in
+			strict)
+				strict=1
+			;;
+			ignore-missing)
+				ignore=1
+			;;
+			help)
+				show_help
+			;;
+			tag|bsd)
+				tag=1
+			;;
+			quiet)
+				silent=1
+			;;
+			status)
+				status=1
+			;;
+			warn|warning)
+				warn=1
+			;;
+			check)
+				check=1
+			;;
+			ver|version)
+				printf -- '%s\n' "${app} ${ver}"
+				exit 0
+			;;
+			binary|text|UNIVERSAL|01|portable)
+				:
+			;;
+			*)
+				show_unrec
+			;;
+		esac
+	;;
+	*)
+		show_unrec
+		;;
+	esac
+done
+shift $(( OPTIND - 1 ))
+case "${status}" in
+	1)
+		exec &>/dev/null
+	;;
+esac
+case "${check}" in
+	1)
+		set_sum "${@}"
+	;;
+esac
+unset option OPTARG quiet
+case "${#}" in
+	0)
+		data="/dev/stdin"
+		process_data
+	;;
+	*)
+		set_data "${@}"
+	;;
+esac
+exit "${code:-"0"}"
+}
+
+main "${@//'$`\'}"
